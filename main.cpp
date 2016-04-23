@@ -1,16 +1,3 @@
-/*
- * To change this license header, choose License Headers in Project Properties.
- * To change this template file, choose Tools | Templates
- * and open the template in the editor.
- */
-
-/* 
- * File:   main.cpp
- * Author: d
- *
- * Created on April 10, 2016, 12:02 AM
- */
-
 #include <cstdlib>
 #include <iostream>
 #include <unistd.h>
@@ -24,16 +11,26 @@ int f(int sleep_time) {
 }
 
 int main(int argc, char** argv) {
-    CompletionThreadPool<int> threadPool;
-    threadPool.Submit(f, 4);
-    threadPool.Submit(f, 1);
-
-    std::future<int> first = threadPool.Take();
-    std::future<int> second = threadPool.Take();
     
+    std::cout << "Test ThreadPool";
+    ThreadPool threadPool;
+    std::future<int> first = threadPool.Submit(f, 5);
     std::cout << "first " << first.get() << std::endl;
-    std::cout << "second " << second.get() << std::endl;
     
+    std::future<int> second = threadPool.Submit(f, 1);
+    std::cout << "second " << second.get() << std::endl;
+   
+    std::cout << "Test CompletionThreadPool";
+    CompletionThreadPool<int> completionThreadPool;
+    completionThreadPool.Submit(f, 5);
+    completionThreadPool.Submit(f, 1);
+
+    std::future<int> firstCompletion = completionThreadPool.Take();
+    std::cout << "first " << firstCompletion.get() << std::endl;
+    
+    std::future<int> secondCompletion = completionThreadPool.Take();
+    std::cout << "second " << secondCompletion.get() << std::endl;
+
     return 0;
 }
 

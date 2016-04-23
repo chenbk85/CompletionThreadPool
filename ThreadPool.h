@@ -14,28 +14,45 @@
 
 #include "BlockingQueue.h"
 
+/**
+ * General purpose thread pool with bounded maximum number of threads.
+ * New thread is allocated if there are no idle threads for the newly submitted
+ * task and the maximum pool capacity is not reached.
+ */
 class ThreadPool {
 public:
     ThreadPool(int maxthreads);
 
     virtual ~ThreadPool();
 
+    /**
+     * Submit new task to the pool
+     * @return future for the submitted task
+     */
     template<typename Fn, typename... Args, typename T = typename std::result_of<Fn(Args...)>::type>
     std::future<T> Submit(Fn &&fn, Args &&... args);
 
+    /**
+     * Joins all threads and removes them from pool, prevents new tasks.
+     */
     void Shutdown();
 
-
 protected:
-
     template<typename Fn, typename... Args, typename T = typename std::result_of<Fn(Args...)>::type>
-    void SubmitToListener(BlockingQueue<T>* b, Fn&& fn, Args&&... args);
-
+    void Submit(std::shared_ptr<BlockingQueue<T>> resultSubmissionQueue, Fn &&fn, Args &&... args);
 
 private:
-    void SpawnThread();
+    void TrySpawnThread();
     std::function<void() > GetNextTask();
     void Main();
+
+    void Submit(std::function<void() > task);
+
+    template<typename T>
+    std::pair<std::function<void()>, std::future<T>> CreateNewTask(std::function<T() > call);
+
+    template<typename T>
+    std::function<void() > CreateNewTask(std::function<T() > call, std::shared_ptr<BlockingQueue<T>> resultSubmissionQueue);
 
     template<typename F, typename R>
     void SetPromiseValue(std::promise<R> & p, F && f);
@@ -50,11 +67,11 @@ private:
     std::mutex mutex_;
     std::condition_variable notify_;
     std::atomic<bool> flag_terminate_threads_;
-
+    int idle_threads_;
 };
 
 ThreadPool::ThreadPool(int maxthreads = std::thread::hardware_concurrency())
-: flag_terminate_threads_(false), maxthreads_(maxthreads) {
+: flag_terminate_threads_(false), maxthreads_(maxthreads), idle_threads_(0) {
     std::cout << "ThreadPool with " << maxthreads << " maximum threads" << std::endl;
 }
 
@@ -79,52 +96,63 @@ void ThreadPool::Shutdown() {
 
 template<typename Fn, typename... Args, typename T>
 std::future<T> ThreadPool::Submit(Fn&& fn, Args&&... args) {
-    std::unique_lock<std::mutex> lock(mutex_);
-
-    // If there are already waiting tasks try to spawn one more worker thread
-    if (!tasks_.empty() || threads_.empty())
-        SpawnThread();
-
-    auto call = std::bind(std::forward<Fn>(fn), std::forward<Args>(args)...);
-    std::shared_ptr<std::promise < T>> promise = std::make_shared<std::promise < T >> ();
-
-    std::future<T> future = promise->get_future();
-    std::function<void() > wrapper = [this, call, promise]() {
-        try {
-            SetPromiseValue(*promise, call);
-        } catch (...) {
-            promise->set_exception(std::current_exception());
-        }
-    };
-
-    tasks_.emplace(std::move(wrapper));
-    notify_.notify_one();
-    return future;
+    std::function < T() > call = std::bind(std::forward<Fn>(fn), std::forward<Args>(args)...);
+    std::pair < std::function<void()>, std::future < T>> task = CreateNewTask<T>(call);
+    Submit(task.first);
+    return std::move(task.second);
 }
 
 template<typename Fn, typename... Args, typename T>
-void ThreadPool::SubmitToListener(BlockingQueue<T>* b, Fn&& fn, Args&&... args) {
+void ThreadPool::Submit(std::shared_ptr<BlockingQueue<T>> resultSubmissionQueue, Fn &&fn, Args &&... args) {
+    std::function < T() > call = std::bind(std::forward<Fn>(fn), std::forward<Args>(args)...);
+    std::function<void() > task = CreateNewTask<T>(call, resultSubmissionQueue);
+    Submit(task);
+}
+
+void ThreadPool::Submit(std::function<void() > task) {
     std::unique_lock<std::mutex> lock(mutex_);
 
-    // If there are already waiting tasks try to spawn one more worker thread
-    if (!tasks_.empty() || threads_.empty())
-        SpawnThread();
+    if (flag_terminate_threads_) return;
+    
+    if (idle_threads_ == 0)
+        TrySpawnThread();
 
-    auto call = std::bind(std::forward<Fn>(fn), std::forward<Args>(args)...);
+    tasks_.emplace(std::move(task));
+    notify_.notify_one();
+}
+
+template<typename T>
+std::pair<std::function<void()>, std::future<T>> ThreadPool::CreateNewTask(std::function<T() > call) {
     std::shared_ptr<std::promise < T>> promise = std::make_shared<std::promise < T >> ();
-
-
-    std::function<void() > wrapper = [this, call, promise, b]() {
+    std::future<T> future = promise->get_future();
+    std::function<void() > callWrapper = [this, call, promise]() {
         try {
             SetPromiseValue(*promise, call);
         } catch (...) {
             promise->set_exception(std::current_exception());
         }
-        b->put(promise->get_future());
     };
+    return std::make_pair(callWrapper, std::move(future));
+}
 
-    tasks_.emplace(std::move(wrapper));
-    notify_.notify_one();
+template<typename T>
+std::function<void() > ThreadPool::CreateNewTask(std::function<T() > call, std::shared_ptr<BlockingQueue<T>> resultSubmissionQueue) {
+    std::shared_ptr<std::promise < T>> promise = std::make_shared<std::promise < T >> ();
+    std::function<void() > callWrapper = [this, call, promise, resultSubmissionQueue]() {
+        try {
+            SetPromiseValue(*promise, call);
+        } catch (...) {
+            promise->set_exception(std::current_exception());
+        }
+
+        try {
+            resultSubmissionQueue->put(promise->get_future());
+        } catch (...) {
+            std::cout << "ThreadPool failed to submit future " << std::endl;
+            resultSubmissionQueue->put(std::future<T>());
+        }
+    };
+    return callWrapper;
 }
 
 template<typename F, typename R>
@@ -138,7 +166,7 @@ void ThreadPool::SetPromiseValue(std::promise<void> & p, F && f) {
     p.set_value();
 }
 
-void ThreadPool::SpawnThread() {
+void ThreadPool::TrySpawnThread() {
     if (maxthreads_ > threads_.size()) {
         threads_.emplace_back(&ThreadPool::Main, this);
     }
@@ -148,10 +176,12 @@ std::function<void() > ThreadPool::GetNextTask() {
     std::unique_lock<std::mutex> lock(mutex_);
     while (!flag_terminate_threads_) {
         if (!tasks_.empty()) {
+            if (idle_threads_ > 0) idle_threads_--;
             std::function<void() > task = tasks_.front();
             tasks_.pop();
             return task;
         }
+        idle_threads_++;
         notify_.wait(lock);
     }
     return []() {
