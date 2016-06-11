@@ -39,14 +39,14 @@ public:
 
 protected:
     template<typename Fn, typename... Args, typename T = typename std::result_of<Fn(Args...)>::type>
-    void Submit(std::shared_ptr<BlockingQueue<T>> resultSubmissionQueue, Fn &&fn, Args &&... args);
+    bool Submit(std::shared_ptr<BlockingQueue<T>> resultSubmissionQueue, Fn &&fn, Args &&... args);
 
 private:
     void TrySpawnThread();
     std::function<void() > GetNextTask();
     void Main();
 
-    void Submit(std::function<void() > task);
+    bool Submit(std::function<void() > task);
 
     template<typename T>
     std::pair<std::function<void()>, std::future<T>> CreateNewTask(std::function<T() > call);
@@ -61,12 +61,12 @@ private:
     void SetPromiseValue(std::promise<void> & p, F && f);
 
 private:
-    int maxthreads_;
+    std::atomic<bool> flag_terminate_threads_;
+    size_t maxthreads_;
     std::vector<std::thread> threads_;
     std::queue<std::function<void() >> tasks_;
     std::mutex mutex_;
     std::condition_variable notify_;
-    std::atomic<bool> flag_terminate_threads_;
     int idle_threads_;
 };
 
@@ -98,27 +98,30 @@ template<typename Fn, typename... Args, typename T>
 std::future<T> ThreadPool::Submit(Fn&& fn, Args&&... args) {
     std::function < T() > call = std::bind(std::forward<Fn>(fn), std::forward<Args>(args)...);
     std::pair < std::function<void()>, std::future < T>> task = CreateNewTask<T>(call);
-    Submit(task.first);
+    if (!Submit(task.first))
+        return std::future<T>();
     return std::move(task.second);
 }
 
 template<typename Fn, typename... Args, typename T>
-void ThreadPool::Submit(std::shared_ptr<BlockingQueue<T>> resultSubmissionQueue, Fn &&fn, Args &&... args) {
+bool ThreadPool::Submit(std::shared_ptr<BlockingQueue<T>> resultSubmissionQueue, Fn &&fn, Args &&... args) {
     std::function < T() > call = std::bind(std::forward<Fn>(fn), std::forward<Args>(args)...);
     std::function<void() > task = CreateNewTask<T>(call, resultSubmissionQueue);
-    Submit(task);
+    return Submit(task);
 }
 
-void ThreadPool::Submit(std::function<void() > task) {
+bool ThreadPool::Submit(std::function<void() > task) {
     std::unique_lock<std::mutex> lock(mutex_);
 
-    if (flag_terminate_threads_) return;
+    if (flag_terminate_threads_)
+        return false;
     
     if (idle_threads_ == 0)
         TrySpawnThread();
 
     tasks_.emplace(std::move(task));
     notify_.notify_one();
+    return true;
 }
 
 template<typename T>

@@ -23,7 +23,7 @@ public:
      * @param args function arguments
      */
     template<typename Fn, typename... Args>
-    void Submit(Fn &&fn, Args &&... args);
+    bool Submit(Fn &&fn, Args &&... args);
 
     /**
      * @return future for the first completed task
@@ -36,9 +36,8 @@ private:
 
 template<typename T>
 template<typename Fn, typename... Args>
-void CompletionThreadPool<T>::Submit(Fn &&fn, Args &&... args) {
-   
-    ThreadPool::Submit(blocking_queue_, fn, args...);
+bool CompletionThreadPool<T>::Submit(Fn &&fn, Args &&... args) {
+    return ThreadPool::Submit(blocking_queue_, fn, args...);
 }
 
 template<typename T>
