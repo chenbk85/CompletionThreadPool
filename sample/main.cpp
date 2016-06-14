@@ -19,30 +19,22 @@
 #include <QLabel>
 #include <vector>
 #include <string>
+#include <atomic>
 #include "publisher.h"
 #include "../CompletionThreadPool.h"
 
-QImage downloadSampleImage(const std::string& protocol, const std::string& host,
+QImage downloadSampleImage(const struct addrinfo* serverinfo,
+                           const std::string& host,
                            const std::string& path) {
     const int MAXDATASIZE = 256;
     char buf[MAXDATASIZE];
     memset(buf, 0, 100);
-    struct addrinfo hints, *servinfo, *p;
     int sockfd, numbytes;
-
-    memset(&hints, 0, sizeof hints);
-    hints.ai_family = AF_UNSPEC;
-    hints.ai_socktype = SOCK_STREAM;
-
-    std::cout << "Getting " << path.c_str() << std::endl;
 
     QImage qimage;
 
-    if (getaddrinfo(host.c_str(), protocol.c_str(), &hints, &servinfo) != 0) {
-        return qimage;
-    }
-
-    for(p = servinfo; p != NULL; p = p->ai_next) {
+    const addrinfo* p;
+    for(p = serverinfo; p != NULL; p = p->ai_next) {
         if ((sockfd = socket(p->ai_family, p->ai_socktype,
                              p->ai_protocol)) == -1) {
             continue;
@@ -70,7 +62,6 @@ QImage downloadSampleImage(const std::string& protocol, const std::string& host,
         return qimage;
     }
 
-    freeaddrinfo(servinfo);
 
     std::string response;
     while ((numbytes = recv(sockfd, buf, MAXDATASIZE-1, 0)) > 0) {
@@ -91,48 +82,63 @@ QImage downloadSampleImage(const std::string& protocol, const std::string& host,
     return qimage;
 }
 
+ void workerThreadMain(Publisher &publisher, std::atomic<bool>& stopFlag) {
+        addrinfo hints, *servinfo;
+        memset(&hints, 0, sizeof hints);
+        hints.ai_family = AF_INET;
+        hints.ai_socktype = SOCK_STREAM;
+
+        std::string host("lorempixel.com"), protocol("http");
+        int res = getaddrinfo(host.c_str(), protocol.c_str(), &hints, &servinfo);
+        if (res == 0) {
+            CompletionThreadPool<QImage> completionThreadPool;
+
+            std::vector<std::tuple<addrinfo*, std::string, std::string>> imageUrls = {
+                std::make_tuple(servinfo, host.c_str(), "/1000/1000/"),
+                std::make_tuple(servinfo, host.c_str(), "/50/50/"),
+                std::make_tuple(servinfo, host.c_str(), "/150/150/")
+            };
+
+            int submittedCount = 0;
+            auto it = imageUrls.begin();
+            while (it != imageUrls.end()) {
+                submittedCount += completionThreadPool.Submit(downloadSampleImage,
+                                                              std::get<0>(*it),
+                                                              std::get<1>(*it),
+                                                              std::get<2>(*it));
+                ++it;
+            }
+
+            while (submittedCount--) {
+                if (stopFlag) break;
+                QImage qimage = completionThreadPool.Take().get();
+                if (qimage.valid(0,0)) {
+                    QMetaObject::invokeMethod(&publisher, "publishSlot", Qt::QueuedConnection,
+                                              Q_ARG(QImage, qimage));
+                }
+            }
+        } else {
+            std::cout << "getaddrinfo: " << gai_strerror(res) << std::endl;
+        }
+
+        freeaddrinfo(servinfo);
+ }
+
 int main(int argc, char *argv[])
 {
     QApplication a(argc, argv);
     MainWindow w;
     w.show();
 
-    std::vector<std::tuple<std::string, std::string, std::string>> imageUrls = {
-        std::make_tuple("http", "lorempixel.com", "/1000/1000/"),
-        std::make_tuple("http", "lorempixel.com", "/50/50/"),
-        std::make_tuple("http", "lorempixel.com", "/150/150/")
-    };
-
     std::vector<QLabel*> imageViews = {
-        w.findChild<QLabel*>("label150"),
         w.findChild<QLabel*>("label50"),
+        w.findChild<QLabel*>("label150"),
         w.findChild<QLabel*>("label1000")
     };
 
     Publisher publisher(imageViews);
-
-    std::atomic_bool stopFlag(false);
-    std::thread workerThread([&stopFlag, &publisher, &imageUrls]() {
-        auto it = imageUrls.begin();
-        CompletionThreadPool<QImage> completionThreadPool;
-
-        int submittedCount = 0;
-        while (it != imageUrls.end() && !stopFlag) {
-            submittedCount += completionThreadPool.Submit(downloadSampleImage,
-                                                          std::get<0>(*it),
-                                                          std::get<1>(*it),
-                                                          std::get<2>(*it));
-            ++it;
-        }
-
-        while (submittedCount--) {
-            QImage qimage = completionThreadPool.Take().get();
-            if (qimage.valid(0,0)) {
-                QMetaObject::invokeMethod(&publisher, "publishSlot", Qt::QueuedConnection,
-                                          Q_ARG(QImage, qimage));
-            }
-        }
-    });
+    std::atomic<bool> stopFlag(false);
+    std::thread workerThread(workerThreadMain, std::ref(publisher), std::ref(stopFlag));
 
     int res = a.exec();
     stopFlag = true;
