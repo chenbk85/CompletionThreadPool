@@ -28,7 +28,7 @@ QImage downloadSampleImage(const struct addrinfo* serverinfo,
                            const std::string& path) {
     const int MAXDATASIZE = 256;
     char buf[MAXDATASIZE];
-    memset(buf, 0, 100);
+    memset(buf, 0, MAXDATASIZE);
     int sockfd, numbytes;
 
     QImage qimage;
