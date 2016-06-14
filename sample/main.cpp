@@ -62,9 +62,8 @@ QImage downloadSampleImage(const struct addrinfo* serverinfo,
         return qimage;
     }
 
-
     std::string response;
-    while ((numbytes = recv(sockfd, buf, MAXDATASIZE-1, 0)) > 0) {
+    while ((numbytes = recv(sockfd, buf, MAXDATASIZE, 0)) > 0) {
         if (numbytes == -1)
             return qimage;
 
